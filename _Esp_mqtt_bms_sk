@@ -1,0 +1,129 @@
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include "secrets.h"
+
+WiFiClientSecure net;
+PubSubClient client(net);
+
+unsigned long lastReconnectAttempt = 0;
+
+void printHeap(const char* stage) {
+  Serial.printf("[HEAP] %s - Free heap: %u bytes\n", stage, ESP.getFreeHeap());
+}
+
+void connectToWiFi() {
+  Serial.printf("🔌 Connecting to WiFi: %s\n", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi connected");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ WiFi connection failed.");
+  }
+}
+
+bool testDNSAndInternet() {
+  Serial.println("🌍 Testing DNS & Internet...");
+
+  IPAddress ip;
+  if (!WiFi.hostByName(AWS_MQTT_ENDPOINT, ip)) {
+    Serial.println("❌ DNS resolution failed for AWS endpoint.");
+    return false;
+  } else {
+    Serial.print("✅ AWS endpoint resolved to: ");
+    Serial.println(ip);
+  }
+
+  WiFiClientSecure testClient;
+  testClient.setInsecure();
+  if (!testClient.connect("google.com", 443)) {
+    Serial.println("❌ HTTPS connection to Google failed.");
+    return false;
+  } else {
+    Serial.println("✅ HTTPS to Google OK.");
+    testClient.stop();
+  }
+
+  return true;
+}
+
+bool connectToAWS() {
+  Serial.println("🔐 Setting TLS credentials...");
+  net.setCACert(AWS_ROOT_CA_PEM);
+  net.setCertificate(AWS_DEVICE_CERT_PEM);
+  net.setPrivateKey(AWS_PRIVATE_KEY_PEM);
+  net.setHandshakeTimeout(30);
+
+  Serial.println("🔗 Connecting to AWS IoT...");
+  printHeap("Before MQTT connect");
+
+  client.setServer(AWS_MQTT_ENDPOINT, AWS_MQTT_PORT);
+  if (client.connect("ESP32ClientToken")) {
+    Serial.println("✅ Connected to AWS IoT");
+    client.subscribe("esp32/test");
+    printHeap("After MQTT connect");
+    return true;
+  } else {
+    Serial.printf("❌ MQTT connect failed, rc=%d\n", client.state());
+    return false;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("\n🚀 Starting ESP32 AWS Token MQTT Client");
+
+  connectToWiFi();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("💥 Aborting due to WiFi failure");
+    return;
+  }
+
+  if (!testDNSAndInternet()) {
+    Serial.println("💥 Aborting due to DNS/Internet failure");
+    return;
+  }
+
+  client.setCallback([](char* topic, byte* payload, unsigned int length) {
+    Serial.print("📩 Message on ");
+    Serial.print(topic);
+    Serial.print(": ");
+    for (unsigned int i = 0; i < length; i++) {
+      Serial.print((char)payload[i]);
+    }
+    Serial.println();
+  });
+
+  connectToAWS();
+  lastReconnectAttempt = millis();
+}
+
+void loop() {
+  if (!client.connected()) {
+    if (millis() - lastReconnectAttempt > 10000) {
+      Serial.println("🔄 Reconnecting to AWS...");
+      if (connectToAWS()) {
+        lastReconnectAttempt = millis();
+      }
+    }
+  } else {
+    client.loop();
+  }
+
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 5000) {
+    printHeap("Loop");
+    lastPrint = millis();
+  }
+}
