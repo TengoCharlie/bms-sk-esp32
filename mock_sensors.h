@@ -13,25 +13,35 @@
 // ===================== Mock INA219 Class ===================== //
 class Adafruit_INA219 {
   public:
-    Adafruit_INA219(uint8_t addr) {}
+    Adafruit_INA219(uint8_t addr) : address(addr) {}
 
     bool begin() {
-      Serial.println("[MOCK] INA219.begin() successful");
+      Serial.printf("[MOCK] INA219 sensor at 0x%02X initialized.\n", address);
       return true;
     }
 
     float getBusVoltage_V() {
-      return 4.3 + random(1, 20) / 100.0;  // Simulate 3.1–3.5V
+      switch (address) {
+        case 0x40: return 3.5;                   // Cell 1
+        case 0x41: return 3.5 + 3.6;             // Cell 1 + 2
+        case 0x44: return 3.5 + 3.6 + 3.7;       // Cell 1 + 2 + 3
+        case 0x45: return 3.5 + 3.6 + 3.7 + 3.8; // Total
+        default: return 3.3;
+      }
     }
 
     float getCurrent_mA() {
-      return 1000.0 + random(-300, 300);  // Simulate ~1000mA
+      return 1200.0 + random(-100, 100);  // Simulate 1100–1300 mA
     }
 
     float getPower_mW() {
-      return getBusVoltage_V() * (getCurrent_mA() / 1000.0) * 1000.0;
+      return getBusVoltage_V() * getCurrent_mA();
     }
+
+  private:
+    uint8_t address;
 };
+
 
 // ===================== Mock OLED Display ===================== //
 #include <Adafruit_GFX.h>  // Can be included or stubbed too
