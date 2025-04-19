@@ -1,196 +1,260 @@
 #include <Wire.h>
+#include <Adafruit_INA219.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <PubSubClient.h>
-#include <ArduinoJson.h>
-#include "secrets.h"
-
-// Optional: OLED display (can be skipped if not used)
+#include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+
+// INA219 sensor instances
+Adafruit_INA219 ina219_1(0x40);
+Adafruit_INA219 ina219_2(0x41);
+Adafruit_INA219 ina219_3(0x44);
+Adafruit_INA219 ina219_4(0x45);
+
+// OLED display parameters
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 32
-#define OLED_RESET -1
+#define OLED_RESET    -1  // No reset pin on the OLED
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Define to use mock data
-// #define USE_MOCK_SENSORS
+// Wi-Fi credentials
+const char* ssid = "        ";  // Replace with your network name
+const char* password = "        ";  // Replace with your password
 
-#ifdef USE_MOCK_SENSORS
-float getVoltage(int ch) { return 3.5 + (ch * 0.05); }
-float getCurrent(int ch) { return 1000 + (ch * 10); }
-float getTemperature(int pin) { return 25.0 + (pin % 3); }
-void initSensors() { Serial.println("🔧 Mock sensors initialized."); }
-#else
-#include <Adafruit_INA219.h>
-Adafruit_INA219 ina219_1(0x40), ina219_2(0x41), ina219_3(0x44), ina219_4(0x45);
-void initSensors() {
-  ina219_1.begin(); ina219_2.begin(); ina219_3.begin(); ina219_4.begin();
-}
-float getVoltage(int ch) {
-  switch (ch) {
-    case 1: return ina219_1.getBusVoltage_V();
-    case 2: return ina219_2.getBusVoltage_V();
-    case 3: return ina219_3.getBusVoltage_V();
-    case 4: return ina219_4.getBusVoltage_V();
-    default: return 0.0;
-  }
-}
-float getCurrent(int ch) {
-  switch (ch) {
-    case 1: return ina219_1.getCurrent_mA();
-    case 2: return ina219_2.getCurrent_mA();
-    case 3: return ina219_3.getCurrent_mA();
-    case 4: return ina219_4.getCurrent_mA();
-    default: return 0.0;
-  }
-}
+// Web server on port 80
+WebServer server(80);
+
+// Setup pin for cutoff control
+const int cutoffPin = 4;  // Pin D25 to control cutoff
+
+const float MIN_VOLTAGE = 2.0;
+const float MAX_VOLTAGE = 4.2;
+const float MAX_CURRENT = 6000;  // 3A in mA
+
+// Global variables for temperature limits
+const float MIN_TEMPERATURE = -20.0;   // Minimum safe temperature in Celsius
+const float MAX_TEMPERATURE = 50.0;  // Maximum safe temperature in Celsius
+
+// Define variables to hold temperature values
+float temperature1, temperature2, temperature3, temperature4;
+
+// Define variables to hold cell voltages and currents
+float cellVoltage_1, cellVoltage_2, cellVoltage_3, cellVoltage_4;
+float current_mA_1, current_mA_2, current_mA_3, current_mA_4;
+
+// Function to convert raw analog value from NTC thermistors to temperature
 float getTemperature(int pin) {
-  int raw = analogRead(pin);
-  float resistance = ((4095.0 / raw) - 1) * 100000.0;
+  int rawValue = analogRead(pin);
+  float resistance = ((4095.0 / rawValue) - 1) * 100000.0; // Assuming 100k reference resistor
   resistance = 100000.0 / resistance;
-  float tempK = log(resistance);
-  tempK = 1 / (0.001129148 + (0.000234125 * tempK) + (0.0000000876741 * tempK * tempK * tempK));
-  return tempK - 273.15;
-}
-#endif
 
-WiFiClientSecure net;
-PubSubClient client(net);
+  // Using Steinhart-Hart equation
+  float temperature = log(resistance);
+  temperature = 1 / (0.001129148 + (0.000234125 * temperature) + (0.0000000876741 * temperature * temperature * temperature));
+  temperature = (temperature - 273.15)/20; // Convert Kelvin to Celsius
 
-const int cutoffPin = 4;
-const float MIN_VOLTAGE = 2.0, MAX_VOLTAGE = 4.2, MAX_CURRENT = 6000;
-const float MIN_TEMPERATURE = -20.0, MAX_TEMPERATURE = 50.0;
-
-void connectToWiFi() {
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000); Serial.print(".");
-  }
-  Serial.println("\n✅ WiFi connected"); Serial.println(WiFi.localIP());
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("📩 ["); Serial.print(topic); Serial.print("] ");
-  for (unsigned int i = 0; i < length; i++) Serial.print((char)payload[i]);
-  Serial.println();
-}
-
-void connectToAWS() {
-  net.setCACert(AWS_ROOT_CA_PEM);
-  net.setCertificate(AWS_DEVICE_CERT_PEM);
-  net.setPrivateKey(AWS_PRIVATE_KEY_PEM);
-  client.setServer(AWS_MQTT_ENDPOINT, AWS_MQTT_PORT);
-  client.setCallback(callback);
-
-  while (!client.connected()) {
-    if (client.connect(MQTT_CLIENT_ID)) {
-      Serial.println("✅ Connected to AWS IoT");
-      client.subscribe("esp32/#");
-    } else {
-      Serial.print("Retrying MQTT... ");
-      delay(2000);
-    }
-  }
-}
-
-int voltageToPercentage(float v) {
-  return constrain((int)((v - 3.2) / (4.2 - 3.2) * 100), 0, 100);
-}
-
-bool checkCellConditions(float voltage, float current, float temp, const String& cellLabel) {
-  bool cutoff = false;
-  if (voltage < MIN_VOLTAGE) {
-    Serial.println(cellLabel + ": Voltage too LOW");
-    cutoff = true;
-  } else if (voltage > MAX_VOLTAGE) {
-    Serial.println(cellLabel + ": Voltage too HIGH");
-    cutoff = true;
-  }
-  if (current > MAX_CURRENT) {
-    Serial.println(cellLabel + ": Current too HIGH");
-    cutoff = true;
-  }
-  if (temp < MIN_TEMPERATURE) {
-    Serial.println(cellLabel + ": Temp too LOW");
-    cutoff = true;
-  } else if (temp > MAX_TEMPERATURE) {
-    Serial.println(cellLabel + ": Temp too HIGH");
-    cutoff = true;
-  }
-  return cutoff;
-}
-
-void publishSensorData() {
-  float V[5], I[5], T[5];
-  for (int i = 1; i <= 4; i++) {
-    V[i] = getVoltage(i);
-    I[i] = getCurrent(i);
-  }
-
-  V[2] -= V[1]; V[3] -= V[2] + V[1]; V[4] -= V[3] + V[2] + V[1];
-
-  T[1] = getTemperature(36);
-  T[2] = getTemperature(39);
-  T[3] = getTemperature(34);
-  T[4] = getTemperature(35);
-
-  bool trigger = false;
-  for (int i = 1; i <= 4; i++) {
-    String id = "BAT" + String(i);
-    trigger |= checkCellConditions(V[i], I[i], T[i], id);
-  }
-
-  digitalWrite(cutoffPin, trigger ? LOW : HIGH);
-
-  StaticJsonDocument<1024> doc;
-  doc["timestamp"] = millis();  // Use NTP or RTC in real apps
-  JsonArray batteries = doc.createNestedArray("batteries");
-
-  for (int i = 1; i <= 4; i++) {
-    JsonObject bat = batteries.createNestedObject();
-    bat["battery_id"] = "BAT" + String(i);
-    bat["percentage"] = voltageToPercentage(V[i]);
-    bat["temperature_celsius"] = round(T[i] * 100) / 100.0;
-    bat["voltage"] = round(V[i] * 100) / 100.0;
-    bat["current"] = round(I[i] * 100) / 100.0;
-  }
-
-  char jsonStr[1024];
-  serializeJson(doc, jsonStr);
-  client.publish(MQTT_PUBLISH_TOPIC, jsonStr);
-  Serial.println("📤 JSON published to MQTT:");
-  Serial.println(jsonStr);
+  return temperature;
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(cutoffPin, OUTPUT);
-  digitalWrite(cutoffPin, HIGH);
 
+  // Initialize INA219 sensors
+  if (!ina219_1.begin()) { Serial.println("Failed to find INA219 at 0x40"); while (1); }
+  if (!ina219_2.begin()) { Serial.println("Failed to find INA219 at 0x41"); while (1); }
+  if (!ina219_3.begin()) { Serial.println("Failed to find INA219 at 0x44"); while (1); }
+  if (!ina219_4.begin()) { Serial.println("Failed to find INA219 at 0x45"); while (1); }
+
+  // Initialize OLED display
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED not found");
-  } else {
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println("Booting...");
-    display.display();
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;); // Loop forever
   }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
 
-  connectToWiFi();
-  connectToAWS();
-  initSensors();
+   // Attempt Wi-Fi connection
+  WiFi.begin(ssid, password);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 1) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+    attempts++;
+  }
+  Serial.println("Connected to WiFi");
 
+  // Display IP address on OLED
+  String ipAddress = WiFi.localIP().toString();
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.println("MQTT Connected");
-  display.display();
+  display.println("IP Address:");
+  display.println(ipAddress);
+  display.display();  // Show the IP address on the OLED
+
+  // Start the web server
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("Web server started");
+  Serial.println(WiFi.localIP());
+
+  // Setup cutoff pin
+  pinMode(cutoffPin, OUTPUT);
+  digitalWrite(cutoffPin, HIGH);  // Initially set to HIGH (no cutoff)
 }
 
 void loop() {
-  if (!client.connected()) connectToAWS();
-  client.loop();
+  // Read INA219 sensor values for total voltage and current
+  float Voltage_1 = ina219_1.getBusVoltage_V();
+  float Voltage_2 = ina219_2.getBusVoltage_V();
+  float Voltage_3 = ina219_3.getBusVoltage_V();
+  float Voltage_4 = ina219_4.getBusVoltage_V();
 
-  publishSensorData();
-  delay(10000);
+  current_mA_1 = ina219_1.getCurrent_mA();
+  current_mA_2 = ina219_2.getCurrent_mA();
+  current_mA_3 = ina219_3.getCurrent_mA();
+  current_mA_4 = ina219_4.getCurrent_mA();
+  float power_mW_4 = ina219_4.getPower_mW();
+
+  // Calculate individual cell voltages
+  cellVoltage_1 = Voltage_1;
+  cellVoltage_2 = Voltage_2 - Voltage_1;
+  cellVoltage_3 = Voltage_3 - Voltage_2;
+  cellVoltage_4 = Voltage_4 - Voltage_3;
+
+  // Get temperatures from NTC thermistors
+  temperature1 = getTemperature(36);
+  temperature2 = getTemperature(39);
+  temperature3 = getTemperature(34);
+  temperature4 = getTemperature(35);
+
+  // Print to Serial Monitor
+  Serial.print("Cell 1 Voltage: "); Serial.print(cellVoltage_1); Serial.print(" V, Current: "); Serial.print(current_mA_1); Serial.println(" mA");
+  Serial.print("Cell 2 Voltage: "); Serial.print(cellVoltage_2); Serial.print(" V, Current: "); Serial.print(current_mA_2*100); Serial.println(" mA");
+  Serial.print("Cell 3 Voltage: "); Serial.print(cellVoltage_3); Serial.print(" V, Current: "); Serial.print(current_mA_3); Serial.println(" mA");
+  Serial.print("Cell 4 Voltage: "); Serial.print(cellVoltage_4); Serial.print(" V, Current: "); Serial.print(current_mA_4); Serial.print(" mA, Power: "); Serial.print(power_mW_4); Serial.println(" mW");
+
+  Serial.print("Temperature 1: "); Serial.print(temperature1); Serial.println(" C");
+  Serial.print("Temperature 2: "); Serial.print(temperature2); Serial.println(" C");
+  Serial.print("Temperature 3: "); Serial.print(temperature3); Serial.println(" C");
+  Serial.print("Temperature 4: "); Serial.print(temperature4); Serial.println(" C");
+
+  // Check cutoff conditions for voltage, current, and temperature
+  checkCellConditions(cellVoltage_1, cellVoltage_2, cellVoltage_3, cellVoltage_4, current_mA_1, current_mA_2, current_mA_3, current_mA_4, temperature1, temperature2, temperature3, temperature4);
+
+  // Serve web page
+  server.handleClient();
+
+  delay(100);  // Delay between readings
+}
+
+void handleRoot() {
+  String html = "<html><body>";
+  html += "<h1>INA219 Sensor Readings</h1>";
+  html += "<p>Cell 1 -> Voltage: " + String(cellVoltage_1) + " V, Current: " + String(current_mA_1) + " mA</p>";
+  html += "<p>Cell 2 -> Voltage: " + String(cellVoltage_2) + " V, Current: " + String(current_mA_2) + " mA</p>";
+  html += "<p>Cell 3 -> Voltage: " + String(cellVoltage_3) + " V, Current: " + String(current_mA_3) + " mA</p>";
+  html += "<p>Cell 4 -> Voltage: " + String(cellVoltage_4) + " V, Current: " + String(current_mA_4) + " mA, Power: " + String(ina219_4.getPower_mW()) + " mW</p>";
+  
+  // Add temperatures to the web page
+  html += "<h2>Temperatures</h2>";
+  html += "<p>Temperature 1: " + String(temperature1) + " C</p>";
+  html += "<p>Temperature 2: " + String(temperature2) + " C</p>";
+  html += "<p>Temperature 3: " + String(temperature3) + " C</p>";
+  html += "<p>Temperature 4: " + String(temperature4) + " C</p>";
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+bool checkCellConditions(float cellVoltage_1, float cellVoltage_2, float cellVoltage_3, float cellVoltage_4, 
+                          float current_mA_1, float current_mA_2, float current_mA_3, float current_mA_4, 
+                          float temp1, float temp2, float temp3, float temp4) {
+  // Check if any condition exceeds the limits and trigger cutoff
+  if (cellVoltage_1 < MIN_VOLTAGE || cellVoltage_1 > MAX_VOLTAGE || current_mA_1 > MAX_CURRENT || temp1 < MIN_TEMPERATURE || temp1 > MAX_TEMPERATURE ||
+      cellVoltage_2 < MIN_VOLTAGE || cellVoltage_2 > MAX_VOLTAGE || current_mA_2 > MAX_CURRENT || temp2 < MIN_TEMPERATURE || temp2 > MAX_TEMPERATURE ||
+      cellVoltage_3 < MIN_VOLTAGE || cellVoltage_3 > MAX_VOLTAGE || current_mA_3 > MAX_CURRENT || temp3 < MIN_TEMPERATURE || temp3 > MAX_TEMPERATURE ||
+      cellVoltage_4 < MIN_VOLTAGE || cellVoltage_4 > MAX_VOLTAGE || current_mA_4 > MAX_CURRENT || temp4 < MIN_TEMPERATURE || temp4 > MAX_TEMPERATURE) {
+      
+    digitalWrite(cutoffPin, LOW);  // Cutoff if any condition fails
+    Serial.println("Cutoff triggered due to out-of-range voltage, current, or temperature.");
+
+    // Log conditions when cutoff occurs
+    scanAndLogCellConditions(cellVoltage_1, cellVoltage_2, cellVoltage_3, cellVoltage_4, 
+                             current_mA_1, current_mA_2, current_mA_3, current_mA_4, temp1, temp2, temp3, temp4);
+
+    return true;  // Return true if cutoff occurred
+  } else {
+    digitalWrite(cutoffPin, HIGH);  // No cutoff if all conditions are within limits
+    return false;  // Return false if no cutoff
+  }
+}
+
+void scanAndLogCellConditions(float cellVoltage_1, float cellVoltage_2, float cellVoltage_3, float cellVoltage_4, 
+                               float current_mA_1, float current_mA_2, float current_mA_3, float current_mA_4, 
+                               float temp1, float temp2, float temp3, float temp4) {
+
+  // Log conditions when cutoff occurs
+  Serial.println("System Cutoff. Logging cell conditions:");
+
+  // Cell 1
+  if (cellVoltage_1 < MIN_VOLTAGE) {
+    Serial.println("Cell 1: Voltage too low");
+  } else if (cellVoltage_1 > MAX_VOLTAGE) {
+    Serial.println("Cell 1: Voltage too high");
+  }
+  if (current_mA_1 > MAX_CURRENT) {
+    Serial.println("Cell 1: Current too high");
+  }
+  if (temp1 < MIN_TEMPERATURE) {
+    Serial.println("Cell 1: Temp too low");
+  } else if (temp1 > MAX_TEMPERATURE) {
+    Serial.println("Cell 1: Temp too high");
+  }
+
+  // Cell 2
+  if (cellVoltage_2 < MIN_VOLTAGE) {
+    Serial.println("Cell 2: Voltage too low");
+  } else if (cellVoltage_2 > MAX_VOLTAGE) {
+    Serial.println("Cell 2: Voltage too high");
+  }
+  if (current_mA_2 > MAX_CURRENT) {
+    Serial.println("Cell 2: Current too high");
+  }
+  if (temp2 < MIN_TEMPERATURE) {
+    Serial.println("Cell 2: Temp too low");
+  } else if (temp2 > MAX_TEMPERATURE) {
+    Serial.println("Cell 2: Temp too high");
+  }
+
+  // Cell 3
+  if (cellVoltage_3 < MIN_VOLTAGE) {
+    Serial.println("Cell 3: Voltage too low");
+  } else if (cellVoltage_3 > MAX_VOLTAGE) {
+    Serial.println("Cell 3: Voltage too high");
+  }
+  if (current_mA_3 > MAX_CURRENT) {
+    Serial.println("Cell 3: Current too high");
+  }
+  if (temp3 < MIN_TEMPERATURE) {
+    Serial.println("Cell 3: Temp too low");
+  } else if (temp3 > MAX_TEMPERATURE) {
+    Serial.println("Cell 3: Temp too high");
+  }
+
+  // Cell 4
+  if (cellVoltage_4 < MIN_VOLTAGE) {
+    Serial.println("Cell 4: Voltage too low");
+  } else if (cellVoltage_4 > MAX_VOLTAGE) {
+    Serial.println("Cell 4: Voltage too high");
+  }
+  if (current_mA_4 > MAX_CURRENT) {
+    Serial.println("Cell 4: Current too high");
+  }
+  if (temp4 < MIN_TEMPERATURE) {
+    Serial.println("Cell 4: Temp too low");
+  } else if (temp4 > MAX_TEMPERATURE) {
+    Serial.println("Cell 4: Temp too high");
+  }
 }
