@@ -10,8 +10,6 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
-#define MQTT_MAX_PACKET_SIZE 2048
-
 // Conditionally include sensor-related headers
 #ifdef USE_MOCK_SENSORS
   #include "mock_sensors.h"

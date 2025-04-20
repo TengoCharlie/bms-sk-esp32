@@ -18,6 +18,10 @@ void setup() {
 
 
 void loop() {
+  #ifdef USE_MOCK_SENSORS;
+  updateSensorOffsets();
+  randomSeed(analogRead(A0));
+  #endif
   readSensorValues();
   calculateVoltages();
   readTemperatures();
