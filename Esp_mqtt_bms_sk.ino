@@ -7,9 +7,7 @@ void setup() {
   initAllSensors();
   initializeDisplay();
   connectToWiFi();
-  logHeap("📶 Post WiFi Connect");
   connectToAWS();
-  logHeap("🔐 Post AWS Connect");
   initTimeUTC();
   initializeWebServer();
   initializeCutoffPin();
@@ -20,8 +18,9 @@ void setup() {
 void loop() {
   #ifdef USE_MOCK_SENSORS;
   updateSensorOffsets();
-  randomSeed(analogRead(A0));
+  randomSeed(analogRead(A0)); //Uconnected Analog pin for garbage value
   #endif
+  
   readSensorValues();
   calculateVoltages();
   readTemperatures();

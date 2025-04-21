@@ -1,7 +1,6 @@
 #pragma once
 #include "Logger.h"
 #include "secrets.h"
-#define USE_MOCK_SENSORS  // ✅ Enable sensor mocks (INA219, SSD1306, analogRead)
 // Always include real Arduino + WebServer headers
 #include <WiFi.h>
 #include <WebServer.h>
@@ -10,6 +9,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+#define USE_MOCK_SENSORS  // ✅ Enable sensor mocks (INA219, SSD1306, analogRead)
 // Conditionally include sensor-related headers
 #ifdef USE_MOCK_SENSORS
   #include "mock_sensors.h"

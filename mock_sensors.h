@@ -55,7 +55,7 @@ public:
 
   float getCurrent_mA() {
     // Base current with offset
-    return 1200.0 + currentOffset + + random(-300, 300)/100;
+    return 1200.0 + currentOffset + random(-300, 300)/100;
   }
 
   float getPower_mW() {
